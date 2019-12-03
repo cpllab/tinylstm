@@ -120,8 +120,8 @@ val_data = batchify(corpus.valid, eval_batch_size)
 test_data = batchify(corpus.test, eval_batch_size)
 
 if val_mask is not None:
-    val_mask = batchify(val_mask, eval_batch_size, args)
-    test_mask = batchify(test_mask, test_batch_size, args)
+    val_mask = batchify(val_mask, eval_batch_size)
+    test_mask = batchify(test_mask, eval_batch_size)
 
 ###############################################################################
 # Build the model

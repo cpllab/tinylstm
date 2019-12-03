@@ -69,4 +69,4 @@ def in1d(source, check):
     Return a boolean mask over `source` where each value is `1` if the corresponding value
     of `source` is in the 1D array `check`.
     """
-    return (source[..., None] == check).any(-1)
+    return (source[..., None] == check).max(-1)[0]
