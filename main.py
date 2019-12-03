@@ -181,7 +181,7 @@ def evaluate(data_source, mask_source=None):
         mask_source = mask_source.float()
 
     with torch.no_grad():
-        for i in range(0, data_source.size(0) - 1, args.bptt):
+        for i in trange(0, data_source.size(0) - 1, args.bptt):
             data, targets, mask = get_batch(data_source, i, mask_source=mask_source)
             output, hidden = model(data, hidden)
             output_flat = output.view(-1, ntokens)
