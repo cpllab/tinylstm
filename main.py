@@ -6,6 +6,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.onnx
+from tqdm import tqdm, trange
 
 import data
 import model
@@ -35,6 +36,14 @@ parser.add_argument('--dropout', type=float, default=0.2,
                     help='dropout applied to layers (0 = no dropout)')
 parser.add_argument('--tied', action='store_true',
                     help='tie the word embedding and softmax weights')
+parser.add_argument('--xent_mode', choices=['splitcross', 'default'],
+                    default='default',
+                    help=('Method for evaluating cross-entropy loss. `default` refers to pytorch '
+                          'builtin, and `splitcross` refers to an approximate softmax eval.'))
+parser.add_argument('--eval_xent_whitelist',
+                    help=('File with one vocab word per line. Word types not in this list will be '
+                          'excluded in model evaluation.'))
+
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
@@ -47,6 +56,7 @@ parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
 parser.add_argument('--logpath', type=str,
                     help='path to write logging info')
+parser.add_argument("--skip_training", action="store_true", default=False)
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
@@ -88,10 +98,30 @@ def batchify(data, bsz):
     data = data.view(bsz, -1).t().contiguous()
     return data.to(device)
 
+val_mask, test_mask = None, None
+if args.eval_xent_whitelist is not None:
+    if args.xent_mode != "default":
+        raise ValueError("Xent whitelisting is only supported with --xent_mode=default")
+
+    print("Re-processing val and test data with xent whitelist at %s" % args.eval_xent_whitelist)
+    with open(args.eval_xent_whitelist, "r") as whitelist_f:
+        xent_whitelist = [line.strip() for line in whitelist_f if line.strip()]
+
+    val_mask = corpus.get_mask(corpus.valid, xent_whitelist)
+    test_mask = corpus.get_mask(corpus.test, xent_whitelist)
+
+    print("%% tokens masked in valid: %.02f%%, test: %.02f%%" %
+            (100 - val_mask.float().mean() * 100., 100 - test_mask.float().mean() * 100.))
+
+# Batchify.
 eval_batch_size = 10
 train_data = batchify(corpus.train, args.batch_size)
 val_data = batchify(corpus.valid, eval_batch_size)
 test_data = batchify(corpus.test, eval_batch_size)
+
+if val_mask is not None:
+    val_mask = batchify(val_mask, eval_batch_size, args)
+    test_mask = batchify(test_mask, test_batch_size, args)
 
 ###############################################################################
 # Build the model
@@ -102,7 +132,9 @@ model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers
 #with open(args.save, 'rb') as f:
 #    model = torch.load(f)
 
-criterion = nn.CrossEntropyLoss()
+# If whitelisting, we need to do per-token masking ==> skip auto-reducing over tokens.
+reduction = "none" if args.eval_xent_whitelist is not None else "elementwise_mean"
+criterion = nn.CrossEntropyLoss(reduction=reduction)
 
 ###############################################################################
 # Training code
@@ -126,25 +158,40 @@ def repackage_hidden(h):
 # by the batchify function. The chunks are along dimension 0, corresponding
 # to the seq_len dimension in the LSTM.
 
-def get_batch(source, i):
+def get_batch(source, i, mask_source=None):
     seq_len = min(args.bptt, len(source) - 1 - i)
     data = source[i:i+seq_len]
     target = source[i+1:i+1+seq_len].view(-1)
-    return data, target
+    if mask_source is not None:
+        mask = mask_source[i+1:i+1+seq_len].view(-1)
+        return data, target, mask
+    return data, target, None
 
 
-def evaluate(data_source):
+def evaluate(data_source, mask_source=None):
     # Turn on evaluation mode which disables dropout.
     model.eval()
     total_loss = 0.
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(eval_batch_size)
+
+    # pre-cast mask vector to float.
+    if mask_source is not None:
+        assert data_source.size(0) == mask_source.size(0)
+        mask_source = mask_source.float()
+
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, args.bptt):
-            data, targets = get_batch(data_source, i)
+            data, targets, mask = get_batch(data_source, i, mask_source=mask_source)
             output, hidden = model(data, hidden)
             output_flat = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output_flat, targets).item()
+
+            batch_loss = criterion(output_flat, targets)
+            if mask is not None:
+                batch_loss *= mask
+
+            total_loss += len(data) * batch_loss.mean().item()
+
             hidden = repackage_hidden(hidden)
     return total_loss / (len(data_source) - 1)
 
@@ -157,7 +204,7 @@ def train():
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(args.batch_size)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
-        data, targets = get_batch(train_data, i)
+        data, targets, _ = get_batch(train_data, i)
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         hidden = repackage_hidden(hidden)
@@ -193,32 +240,33 @@ def export_onnx(path, batch_size, seq_len):
     torch.onnx.export(model, (dummy_input, hidden), path)
 
 
-# Loop over epochs.
-lr = args.lr
-best_val_loss = None
+if not args.skip_training:
+    # Loop over epochs.
+    lr = args.lr
+    best_val_loss = None
 
-# At any point you can hit Ctrl + C to break out of training early.
-try:
-    for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
-        train()
-        val_loss = evaluate(val_data)
+    # At any point you can hit Ctrl + C to break out of training early.
+    try:
+        for epoch in range(1, args.epochs+1):
+            epoch_start_time = time.time()
+            train()
+            val_loss = evaluate(val_data)
+            log('-' * 89)
+            log('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                    'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                            val_loss, math.exp(val_loss)))
+            log('-' * 89)
+            # Save the model if the validation loss is the best we've seen so far.
+            if not best_val_loss or val_loss < best_val_loss:
+                with open(args.save, 'wb') as f:
+                    torch.save(model, f)
+                best_val_loss = val_loss
+            else:
+                # Anneal the learning rate if no improvement has been seen in the validation dataset.
+                lr /= 4.0
+    except KeyboardInterrupt:
         log('-' * 89)
-        log('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
-        log('-' * 89)
-        # Save the model if the validation loss is the best we've seen so far.
-        if not best_val_loss or val_loss < best_val_loss:
-            with open(args.save, 'wb') as f:
-                torch.save(model, f)
-            best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 4.0
-except KeyboardInterrupt:
-    log('-' * 89)
-    log('Exiting from training early')
+        log('Exiting from training early')
 
 # Load the best saved model.
 with open(args.save, 'rb') as f:
@@ -228,7 +276,7 @@ with open(args.save, 'rb') as f:
     model.rnn.flatten_parameters()
 
 # Run on test data.
-test_loss = evaluate(test_data)
+test_loss = evaluate(test_data, mask_source=test_mask)
 log('=' * 89)
 log('| End of training | test loss {} | test ppl {}'.format(
     test_loss, math.exp(test_loss)))

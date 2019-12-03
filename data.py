@@ -46,3 +46,27 @@ class Corpus(object):
                     token += 1
 
         return ids
+
+    def get_mask(self, token_seq, whitelist):
+        """
+        Get an integer mask sequence for the given 1D token sequence.
+        The mask will be of the same length as `token_seq`, and contain a `1` wherever
+        the corresponding token in `token_seq` is in `whitelist`.
+        """
+        whitelist = set(list(whitelist) + ["<eos>"])
+        try:
+            whitelist_idxs = [self.dictionary.word2idx[word] for word in whitelist]
+        except KeyError:
+            print("provided whitelist has values not present in model vocab")
+            raise
+
+        whitelist_vec = torch.LongTensor(whitelist_idxs)
+        return in1d(token_seq, whitelist_vec)
+
+
+def in1d(source, check):
+    """
+    Return a boolean mask over `source` where each value is `1` if the corresponding value
+    of `source` is in the 1D array `check`.
+    """
+    return (source[..., None] == check).any(-1)
