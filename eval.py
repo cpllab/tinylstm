@@ -12,6 +12,7 @@ from torch.autograd import Variable
 import sys
 from scipy.stats import gmean
 import data
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description='PyTorch PTB Language Model')
 
@@ -35,6 +36,11 @@ parser.add_argument('--ppl', default=False, action='store_true',
 parser.add_argument('--eval_data', type=str, default='stimuli_items/input_test.raw')
 parser.add_argument('--outf', type=argparse.FileType("w", encoding="utf-8"), default=sys.stdout,
                     help='output file for generated text')
+
+parser.set_defaults(refresh_state=True)
+parser.add_argument("--no_refresh_state", dest="refresh_state", action="store_false",
+                    help="Don't refresh the RNN hidden state between sentences.")
+
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
@@ -78,8 +84,10 @@ with args.outf as f:
     f.write("sentence_id\ttoken_id\ttoken\tsurprisal\n")
     with torch.no_grad():  # no tracking history
         # all_ppls = []
-        for sent_id, sent in enumerate(sents):
-            hidden = model.init_hidden(1)
+        for sent_id, sent in enumerate(tqdm(sents)):
+            if args.refresh_state:
+                hidden = model.init_hidden(1)
+
             input = torch.tensor([[corpus.dictionary.word2idx[sent[0]]]],dtype=torch.long).to(device)
 
             f.write("%i\t%i\t%s\t%f\n" % (sent_id + 1, 1, sent[0], 0.0))
