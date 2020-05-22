@@ -1,7 +1,7 @@
 ###############################################################################
 # Language Modeling on Penn Tree Bank (preprocessed for RNNG)
 #
-# This file evaluates new sentences and print surprisal (base e) of each word.
+# This file evaluates new sentences and print surprisal (base 2) of each word.
 #
 ###############################################################################
 
@@ -99,7 +99,7 @@ with args.outf as f:
                 word_weights = torch.Tensor.numpy(output.squeeze().div(args.temperature).exp().cpu())
                 total_weight = np.sum(word_weights)
                 word_idx = corpus.dictionary.word2idx[w]
-                word_surprisal = -np.log(word_weights[word_idx]/total_weight)
+                word_surprisal = -np.log(word_weights[word_idx]/total_weight) / np.log(2)
                 word_prob = word_weights[word_idx]/total_weight
                 probs.append(word_prob)
 
