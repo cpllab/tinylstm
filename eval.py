@@ -103,8 +103,8 @@ with args.outf as f:
                 word_prob = word_weights[word_idx]/total_weight
                 probs.append(word_prob)
 
-                f.write("%i\t%i\t%s\t%f\n" % (sent_id + 1, i + 1, w, word_surprisal))
-       
+                f.write("%i\t%i\t%s\t%f\n" % (sent_id + 1, i + 2, w, word_surprisal))
+
                 input.fill_(word_idx)
         #     ppl = np.power(np.prod(probs), -1.0/len(sent))
         #     if args.ppl:
